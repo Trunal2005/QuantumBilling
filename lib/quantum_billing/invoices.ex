@@ -797,6 +797,98 @@ defmodule QuantumBilling.Invoices do
     end
   end
 
+  @doc """
+  Cancels a registered e-invoice with the IRP within the statutory 24-hour window.
+  Under Rule 48(4) of the CGST Rules, an IRN can be cancelled on the IRP within 24 hours of generation.
+  If the window has elapsed, cancellation is rejected and a credit note must be issued.
+  On success:
+  - Updates status to "Cancelled"
+  - Records `irn_cancelled_at`, `irn_cancellation_reason`, `irn_cancellation_remarks`
+  - Cancels pending payment link
+  - Logs audit event `:invoice_irn_cancelled`
+  - Broadcasts `:invoice_changed`
+  - Publishes `"invoice.irn_cancelled"` webhook
+  """
+  def cancel_e_invoice(%Invoice{} = invoice, reason_code, remarks, opts \\ [])
+      when is_binary(reason_code) and is_binary(remarks) do
+    cond do
+      invoice.status == "Cancelled" ->
+        {:error, :already_cancelled}
+
+      invoice.status == "Paid" ->
+        {:error, :paid}
+
+      invoice.status == "Credited" ->
+        {:error, :credited}
+
+      not is_binary(invoice.irn) or invoice.irn == "" ->
+        {:error, :no_irn}
+
+      QuantumBilling.EWayBills.live_bill_for_invoice(invoice.id) ->
+        {:error, :live_e_way_bill}
+
+      not Invoice.within_24_hour_irn_window?(invoice) ->
+        {:error, :statutory_window_expired}
+
+      true ->
+        with {:ok, irp_res} <- QuantumBilling.EInvoice.IRPClient.cancel_irn(invoice.irn, reason_code, remarks, opts),
+             {:ok, cancelled} <- mark_e_invoice_cancelled(invoice, reason_code, remarks, irp_res.cancel_date) do
+          QuantumBilling.Audit.log_event(
+            :invoice_irn_cancelled,
+            "Invoice",
+            cancelled.id,
+            Keyword.put(opts, :details, %{
+              "irn" => cancelled.irn,
+              "reason_code" => reason_code,
+              "remarks" => remarks,
+              "cancel_date" => irp_res.cancel_date,
+              "number" => cancelled.invoice_number
+            })
+          )
+
+          broadcast_change(cancelled, :invoice_changed)
+          Webhooks.publish("invoice.irn_cancelled", cancelled.id)
+          {:ok, cancelled}
+        end
+    end
+  end
+
+  defp mark_e_invoice_cancelled(%Invoice{id: id} = _invoice, reason_code, remarks, cancel_date) do
+    Repo.transaction(fn ->
+      case Repo.one(from(i in Invoice, where: i.id == ^id, lock: "FOR UPDATE")) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %Invoice{status: "Paid"} ->
+          Repo.rollback(:paid)
+
+        %Invoice{status: "Credited"} ->
+          Repo.rollback(:credited)
+
+        %Invoice{status: "Cancelled"} ->
+          Repo.rollback(:already_cancelled)
+
+        locked_invoice ->
+          changeset =
+            Ecto.Changeset.change(locked_invoice, %{
+              status: "Cancelled",
+              irn_cancelled_at: cancel_date || DateTime.utc_now() |> DateTime.truncate(:second),
+              irn_cancellation_reason: reason_code,
+              irn_cancellation_remarks: remarks
+            })
+
+          case Repo.update(changeset) do
+            {:ok, updated} ->
+              queue_payment_link_cancel(updated)
+              updated
+
+            {:error, cs} ->
+              Repo.rollback(cs)
+          end
+      end
+    end)
+  end
+
   # Locked and re-read, as Payments.reconcile_payment/3 does, so a payment that
   # lands at the same moment cannot be overwritten by the cancel, or the reverse.
   defp mark_cancelled(%Invoice{id: id} = invoice) do
