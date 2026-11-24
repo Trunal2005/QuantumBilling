@@ -28,10 +28,18 @@ defmodule QuantumBilling.EInvoice.IRPClient do
   Reason code must be statutory code "1" (Duplicate), "2" (Data Entry Mistake), "3" (Order Cancelled), or "4" (Others).
   """
   def cancel_irn(irn, reason_code, remarks, opts \\ []) when is_binary(irn) do
-    if not live?() or Keyword.get(opts, :force_sandbox, false) do
-      simulate_irp_cancellation(irn, reason_code, remarks)
-    else
-      do_live_cancel_irn(irn, reason_code, remarks, opts)
+    mode = Keyword.get(opts, :mode, "live")
+    force_sandbox = Keyword.get(opts, :force_sandbox, false)
+
+    cond do
+      mode == "demo" or force_sandbox ->
+        simulate_irp_cancellation(irn, reason_code, remarks)
+
+      not live?() ->
+        {:error, :live_cancellation_unavailable}
+
+      true ->
+        do_live_cancel_irn(irn, reason_code, remarks, opts)
     end
   end
 
@@ -178,9 +186,22 @@ defmodule QuantumBilling.EInvoice.IRPClient do
   defp parse_ack_date(nil), do: DateTime.utc_now() |> DateTime.truncate(:second)
 
   defp parse_ack_date(date_str) when is_binary(date_str) do
-    case DateTime.from_iso8601(date_str) do
-      {:ok, dt, _offset} -> dt
-      _ -> DateTime.utc_now() |> DateTime.truncate(:second)
+    cleaned = String.trim(date_str) |> String.replace(" ", "T")
+
+    case DateTime.from_iso8601(cleaned) do
+      {:ok, dt, _offset} ->
+        DateTime.shift_zone!(dt, "Etc/UTC")
+
+      _ ->
+        case NaiveDateTime.from_iso8601(cleaned) do
+          {:ok, ndt} ->
+            ndt
+            |> DateTime.from_naive!("Etc/UTC")
+            |> DateTime.add(-19800, :second)
+
+          _ ->
+            DateTime.utc_now() |> DateTime.truncate(:second)
+        end
     end
   end
 

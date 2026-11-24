@@ -7,7 +7,8 @@ defmodule QuantumBilling.EInvoiceCancellationTest do
 
   setup do
     {:ok, _} =
-      QuantumBilling.Settings.update_organization(
+      QuantumBilling.Settings.update_section(
+        QuantumBilling.Settings.get_organization(),
         %{
           "company_name" => "Acme Solutions Pvt Ltd",
           "gstin" => "27AABCU9603R1ZM",
@@ -147,6 +148,85 @@ defmodule QuantumBilling.EInvoiceCancellationTest do
 
       assert {:error, :already_cancelled} =
                Invoices.cancel_e_invoice(registered, "1", "Duplicate")
+    end
+
+    test "refuses cancellation when remarks exceed 100 characters" do
+      invoice = create_test_invoice()
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      {:ok, registered} =
+        invoice
+        |> Ecto.Changeset.change(%{
+          status: "E-Invoice Generated",
+          irn: "9876543210abcdef9876543210abcdef9876543210abcdef9876543210abcdef",
+          ack_number: "1234567890",
+          ack_date: now,
+          irn_mode: "demo"
+        })
+        |> QuantumBilling.Repo.update()
+
+      long_remarks = String.duplicate("a", 101)
+
+      assert {:error, :cancellation_remarks_too_long} =
+               Invoices.cancel_e_invoice(registered, "1", long_remarks)
+    end
+
+    test "refuses cancellation when remarks are blank" do
+      invoice = create_test_invoice()
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      {:ok, registered} =
+        invoice
+        |> Ecto.Changeset.change(%{
+          status: "E-Invoice Generated",
+          irn: "9876543210abcdef9876543210abcdef9876543210abcdef9876543210abcdef",
+          ack_number: "1234567890",
+          ack_date: now,
+          irn_mode: "demo"
+        })
+        |> QuantumBilling.Repo.update()
+
+      assert {:error, :blank_cancellation_remarks} =
+               Invoices.cancel_e_invoice(registered, "1", "   ")
+    end
+
+    test "refuses cancellation when reason code is invalid" do
+      invoice = create_test_invoice()
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      {:ok, registered} =
+        invoice
+        |> Ecto.Changeset.change(%{
+          status: "E-Invoice Generated",
+          irn: "9876543210abcdef9876543210abcdef9876543210abcdef9876543210abcdef",
+          ack_number: "1234567890",
+          ack_date: now,
+          irn_mode: "demo"
+        })
+        |> QuantumBilling.Repo.update()
+
+      assert {:error, :invalid_cancellation_reason} =
+               Invoices.cancel_e_invoice(registered, "99", "Invalid reason")
+    end
+
+    test "refuses live IRN cancellation when live mode credentials are unavailable" do
+      invoice = create_test_invoice()
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      {:ok, registered} =
+        invoice
+        |> Ecto.Changeset.change(%{
+          status: "E-Invoice Generated",
+          irn: "9876543210abcdef9876543210abcdef9876543210abcdef9876543210abcdef",
+          ack_number: "1234567890",
+          ack_date: now,
+          irn_mode: "live"
+        })
+        |> QuantumBilling.Repo.update()
+
+      # In test environment, live?() is false (sandbox mode)
+      assert {:error, :live_cancellation_unavailable} =
+               Invoices.cancel_e_invoice(registered, "1", "Duplicate entry")
     end
   end
 end

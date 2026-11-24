@@ -811,6 +811,9 @@ defmodule QuantumBilling.Invoices do
   """
   def cancel_e_invoice(%Invoice{} = invoice, reason_code, remarks, opts \\ [])
       when is_binary(reason_code) and is_binary(remarks) do
+    trimmed_remarks = String.trim(remarks)
+    reason_code_str = String.trim(reason_code)
+
     cond do
       invoice.status == "Cancelled" ->
         {:error, :already_cancelled}
@@ -821,8 +824,14 @@ defmodule QuantumBilling.Invoices do
       invoice.status == "Credited" ->
         {:error, :credited}
 
+      invoice.status == "Pending E-Invoice" ->
+        {:error, :pending_einvoice}
+
       not is_binary(invoice.irn) or invoice.irn == "" ->
         {:error, :no_irn}
+
+      has_active_credit_notes?(invoice.id) ->
+        {:error, :has_notes}
 
       QuantumBilling.EWayBills.live_bill_for_invoice(invoice.id) ->
         {:error, :live_e_way_bill}
@@ -830,27 +839,54 @@ defmodule QuantumBilling.Invoices do
       not Invoice.within_24_hour_irn_window?(invoice) ->
         {:error, :statutory_window_expired}
 
+      reason_code_str not in Invoice.irn_cancellation_reason_codes() ->
+        {:error, :invalid_cancellation_reason}
+
+      trimmed_remarks == "" ->
+        {:error, :blank_cancellation_remarks}
+
+      String.length(trimmed_remarks) > 100 ->
+        {:error, :cancellation_remarks_too_long}
+
       true ->
-        with {:ok, irp_res} <- QuantumBilling.EInvoice.IRPClient.cancel_irn(invoice.irn, reason_code, remarks, opts),
-             {:ok, cancelled} <- mark_e_invoice_cancelled(invoice, reason_code, remarks, irp_res.cancel_date) do
+        mode = invoice.irn_mode || if(Invoice.demo_irn?(invoice), do: "demo", else: "live")
+
+        client_opts =
+          opts
+          |> Keyword.put(:mode, mode)
+          |> Keyword.put_new(:gstin, invoice.company_gstin)
+
+        with {:ok, irp_res} <- QuantumBilling.EInvoice.IRPClient.cancel_irn(invoice.irn, reason_code_str, trimmed_remarks, client_opts),
+             {:ok, cancelled} <- mark_e_invoice_cancelled(invoice, reason_code_str, trimmed_remarks, irp_res.cancel_date) do
+          user_id = Keyword.get(opts, :user_id)
+
           QuantumBilling.Audit.log_event(
             :invoice_irn_cancelled,
             "Invoice",
             cancelled.id,
             Keyword.put(opts, :details, %{
               "irn" => cancelled.irn,
-              "reason_code" => reason_code,
-              "remarks" => remarks,
+              "reason_code" => reason_code_str,
+              "remarks" => trimmed_remarks,
               "cancel_date" => irp_res.cancel_date,
-              "number" => cancelled.invoice_number
+              "number" => cancelled.invoice_number,
+              "user_id" => user_id
             })
           )
 
           broadcast_change(cancelled, :invoice_changed)
           Webhooks.publish("invoice.irn_cancelled", cancelled.id)
+          Webhooks.publish("invoice.cancelled", cancelled.id)
           {:ok, cancelled}
         end
     end
+  end
+
+  defp has_active_credit_notes?(invoice_id) do
+    from(n in CreditNote,
+      where: n.invoice_id == ^invoice_id and n.status != "Cancelled"
+    )
+    |> Repo.exists?()
   end
 
   defp mark_e_invoice_cancelled(%Invoice{id: id} = _invoice, reason_code, remarks, cancel_date) do
@@ -858,15 +894,6 @@ defmodule QuantumBilling.Invoices do
       case Repo.one(from(i in Invoice, where: i.id == ^id, lock: "FOR UPDATE")) do
         nil ->
           Repo.rollback(:not_found)
-
-        %Invoice{status: "Paid"} ->
-          Repo.rollback(:paid)
-
-        %Invoice{status: "Credited"} ->
-          Repo.rollback(:credited)
-
-        %Invoice{status: "Cancelled"} ->
-          Repo.rollback(:already_cancelled)
 
         locked_invoice ->
           changeset =

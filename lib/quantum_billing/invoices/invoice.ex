@@ -307,7 +307,11 @@ defmodule QuantumBilling.Invoices.Invoice do
     {"4", "Others"}
   ]
 
+  @irn_cancellation_reason_codes Enum.map(@irn_cancellation_reasons, &elem(&1, 0))
+
   def irn_cancellation_reasons, do: @irn_cancellation_reasons
+  def irn_cancellation_reason_codes, do: @irn_cancellation_reason_codes
+  def valid_irn_cancellation_reason?(code), do: code in @irn_cancellation_reason_codes
 
   @doc """
   Records the IRP's answer on the invoice. `irn_mode` comes from the IRP client, never a form.

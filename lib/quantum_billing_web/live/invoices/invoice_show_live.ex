@@ -244,10 +244,17 @@ defmodule QuantumBillingWeb.InvoiceShowLive do
 
     case Invoices.cancel_e_invoice(socket.assigns.invoice, reason_code, remarks, opts) do
       {:ok, updated_invoice} ->
+        msg =
+          if Invoice.demo_irn?(updated_invoice) do
+            "e-Invoice (IRN) cancellation simulated in sandbox mode."
+          else
+            "e-Invoice (IRN) cancelled successfully on IRP."
+          end
+
         {:noreply,
          socket
-         |> put_flash(:info, "e-Invoice (IRN) cancelled successfully on IRP.")
-         |> assign(:invoice, updated_invoice)
+         |> put_flash(:info, msg)
+         |> assign(:invoice, QuantumBilling.Repo.preload(updated_invoice, :items))
          |> assign(:show_cancel_irn_modal, false)}
 
       {:error, :statutory_window_expired} ->
@@ -266,6 +273,39 @@ defmodule QuantumBillingWeb.InvoiceShowLive do
            :error,
            "Cannot cancel e-invoice: an active e-way bill is attached to this invoice. Please cancel the e-way bill first."
          )
+         |> assign(:show_cancel_irn_modal, false)}
+
+      {:error, :has_notes} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :error,
+           "Cannot cancel e-invoice: this invoice has active credit or debit notes. Please cancel the notes first."
+         )
+         |> assign(:show_cancel_irn_modal, false)}
+
+      {:error, :invalid_cancellation_reason} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Invalid cancellation reason code. Must be 1, 2, 3, or 4.")
+         |> assign(:show_cancel_irn_modal, false)}
+
+      {:error, :blank_cancellation_remarks} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Cancellation remarks cannot be blank.")
+         |> assign(:show_cancel_irn_modal, false)}
+
+      {:error, :cancellation_remarks_too_long} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Cancellation remarks cannot exceed 100 characters.")
+         |> assign(:show_cancel_irn_modal, false)}
+
+      {:error, :live_cancellation_unavailable} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Live IRP cancellation is unavailable. Please configure live credentials or use demo mode.")
          |> assign(:show_cancel_irn_modal, false)}
 
       {:error, :already_cancelled} ->
@@ -358,7 +398,7 @@ defmodule QuantumBillingWeb.InvoiceShowLive do
 
       <div class="mb-6 space-y-3">
         <div
-          :if={@invoice.irn && !Invoice.demo_irn?(@invoice)}
+          :if={@invoice.irn && !Invoice.demo_irn?(@invoice) && !Invoice.irn_cancelled?(@invoice)}
           id="irn-panel"
           class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4"
         >
@@ -391,7 +431,7 @@ defmodule QuantumBillingWeb.InvoiceShowLive do
 
         <%!-- A demo IRN looks exactly like a real one; this panel must not. --%>
         <div
-          :if={Invoice.demo_irn?(@invoice)}
+          :if={Invoice.demo_irn?(@invoice) && !Invoice.irn_cancelled?(@invoice)}
           id="demo-irn-panel"
           class="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4"
         >
@@ -420,6 +460,29 @@ defmodule QuantumBillingWeb.InvoiceShowLive do
             >
               <.icon name="hero-qr-code" class="size-4" /> View Demo QR Code
             </button>
+          </div>
+        </div>
+
+        <div
+          :if={Invoice.irn_cancelled?(@invoice)}
+          id="irn-cancelled-panel"
+          class="rounded-xl border border-rose-500/40 bg-rose-500/10 p-4"
+        >
+          <div class="space-y-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="inline-flex items-center gap-1 rounded-md bg-rose-600 px-2 py-0.5 text-xs font-bold text-white">
+                <.icon name="hero-x-circle" class="size-3.5" /> e-Invoice Cancelled
+              </span>
+              <span class="text-xs text-base-content/60">
+                Reason: <strong class="text-base-content">{@invoice.irn_cancellation_reason}</strong>
+              </span>
+            </div>
+            <p class="font-mono text-xs text-rose-400 break-all">
+              IRN: {@invoice.irn}
+            </p>
+            <p :if={@invoice.irn_cancellation_remarks} class="text-xs text-base-content/70">
+              Remarks: {@invoice.irn_cancellation_remarks}
+            </p>
           </div>
         </div>
 
@@ -812,7 +875,8 @@ defmodule QuantumBillingWeb.InvoiceShowLive do
               <input
                 type="text"
                 name="remarks"
-                placeholder="Reason for cancelling this e-invoice"
+                maxlength="100"
+                placeholder="Reason for cancelling this e-invoice (max 100 characters)"
                 class="input input-bordered w-full text-xs"
                 required
               />
