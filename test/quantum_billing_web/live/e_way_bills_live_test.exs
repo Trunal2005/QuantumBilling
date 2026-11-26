@@ -308,6 +308,45 @@ defmodule QuantumBillingWeb.EWayBillsLiveTest do
     end
   end
 
+  describe "extending validity" do
+    test "extends validity from the liveview modal", %{conn: conn} do
+      bill = bill(%{client_name: "Northwind Traders", vehicle_number: "MH04CD5678"})
+
+      near_expiry =
+        NaiveDateTime.add(NaiveDateTime.utc_now(), 7_200 + 19_800, :second)
+        |> NaiveDateTime.truncate(:second)
+
+      {:ok, bill} =
+        bill
+        |> Ecto.Changeset.change(%{valid_until: near_expiry})
+        |> Repo.update()
+
+      {:ok, view, html} = live(conn, ~p"/e-way-bills")
+      assert html =~ ~s(phx-value-action="extend")
+
+      render_click(view, "open_action", %{"action" => "extend", "id" => to_string(bill.id)})
+      assert has_element?(view, "#ewb-extend-form")
+
+      html =
+        view
+        |> form("#ewb-extend-form", %{
+          "reason" => "Breakdown",
+          "remaining_distance" => "250",
+          "vehicle_number" => "MH12XY7777",
+          "mode_of_transport" => "Road",
+          "from_place" => "Nashik"
+        })
+        |> render_submit()
+
+      assert html =~ "extended"
+      refute has_element?(view, "#ewb-extend-form")
+
+      updated = EWayBills.get_e_way_bill(bill.id)
+      assert updated.vehicle_number == "MH12XY7777"
+      assert updated.distance_km == 250
+    end
+  end
+
   describe "moving a bill to the Bin" do
     test "is offered on a bill in every state", %{conn: conn} do
       active = bill(%{client_name: "Active Co"})

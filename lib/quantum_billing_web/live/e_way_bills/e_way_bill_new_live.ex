@@ -465,10 +465,10 @@ defmodule QuantumBillingWeb.EWayBillNewLive do
                 />
                 <.field
                   field={f[:vehicle_no]}
-                  label="Vehicle No."
+                  label={vehicle_label(f[:transport_mode].value)}
                   required
-                  placeholder="MH01AB1234"
-                  hint="Format: MH01AB1234"
+                  placeholder={vehicle_placeholder(f[:transport_mode].value)}
+                  hint={vehicle_hint(f[:transport_mode].value)}
                 /> <.field field={f[:from_place]} label="From Place" required placeholder="Mumbai" />
                 <.field field={f[:to_place]} label="To Place" required placeholder="Pune" />
                 <.field
@@ -616,4 +616,19 @@ defmodule QuantumBillingWeb.EWayBillNewLive do
   defp blank(nil), do: "—"
   defp blank(""), do: "—"
   defp blank(value), do: value
+
+  defp vehicle_label("Rail"), do: "Railway Receipt (RR) No."
+  defp vehicle_label("Air"), do: "Airway Bill (AWB) No."
+  defp vehicle_label("Ship"), do: "Bill of Lading (BOL) No."
+  defp vehicle_label(_road), do: "Vehicle No."
+
+  defp vehicle_placeholder("Rail"), do: "e.g. RR-982341"
+  defp vehicle_placeholder("Air"), do: "e.g. AWB-1029384"
+  defp vehicle_placeholder("Ship"), do: "e.g. BOL-56789"
+  defp vehicle_placeholder(_road), do: "MH01AB1234"
+
+  defp vehicle_hint("Rail"), do: "Railway Receipt document number"
+  defp vehicle_hint("Air"), do: "Airway Bill document number"
+  defp vehicle_hint("Ship"), do: "Bill of Lading document number"
+  defp vehicle_hint(_road), do: "Format: MH01AB1234"
 end

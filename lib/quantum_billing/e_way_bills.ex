@@ -32,6 +32,11 @@ defmodule QuantumBilling.EWayBills do
 
   # Rule 138(9): a bill may be cancelled within twenty-four hours of generation.
   @cancellation_window_hours 24
+  # Rule 138(10): validity may be extended within eight hours before or after expiry.
+  @extension_window_hours 8
+  @extension_window_seconds 8 * 3600
+  # Indian Standard Time (UTC+5:30) offset.
+  @ist_offset_seconds 19_800
 
   @default_per_page 10
   @max_per_page 200
@@ -46,6 +51,14 @@ defmodule QuantumBilling.EWayBills do
     with :ok <- QuantumBilling.Tax.ensure_gst(invoice),
          :ok <- ensure_issuable(invoice),
          {:ok, attrs} <- NICClient.generate_ewb(invoice, params) do
+      now = now_ist()
+
+      # Mark any prior expired active bills for this invoice as "Expired".
+      from(b in EWayBill,
+        where: b.invoice_id == ^invoice.id and b.status == "Active" and b.valid_until < ^now
+      )
+      |> Repo.update_all(set: [status: "Expired"])
+
       attrs =
         attrs
         |> Map.put(:invoice_id, invoice.id)
@@ -188,6 +201,103 @@ defmodule QuantumBilling.EWayBills do
     end
   end
 
+  @doc """
+  Extends the validity of an e-way bill under Rule 138(10).
+
+  Allowed within 8 hours before or after expiry time. Updates validity and adds
+  a Part-B transit leg if vehicle or mode changed.
+  """
+  def extend_validity(%EWayBill{} = bill, params \\ %{}) do
+    params = stringify(params)
+
+    with :ok <- ensure_extendable(bill),
+         {:ok, portal_resp} <- NICClient.extend_validity(bill, params) do
+      new_valid_until =
+        case portal_resp do
+          %{"valid_until" => %NaiveDateTime{} = dt} ->
+            dt
+
+          %{"validUntil" => str} when is_binary(str) ->
+            parse_portal_datetime(str) || calculate_extended_validity(bill, params)
+
+          _ ->
+            calculate_extended_validity(bill, params)
+        end
+
+      remaining_km =
+        case Integer.parse(to_string(Map.get(params, "remaining_distance", bill.distance_km))) do
+          {km, ""} -> km
+          _ -> bill.distance_km
+        end
+
+      new_vehicle = presence(Map.get(params, "vehicle_number")) || bill.vehicle_number
+      new_mode = presence(Map.get(params, "mode_of_transport")) || bill.mode_of_transport || "Road"
+      place = presence(Map.get(params, "from_place")) || "In Transit"
+      reason = Map.get(params, "reason") || "Extension"
+
+      multi =
+        Ecto.Multi.new()
+        |> Ecto.Multi.update(:bill, fn _changes ->
+          Ecto.Changeset.change(bill, %{
+            valid_until: new_valid_until,
+            distance_km: remaining_km,
+            vehicle_number: new_vehicle,
+            mode_of_transport: new_mode,
+            status: "Active"
+          })
+        end)
+
+      multi =
+        if new_vehicle != bill.vehicle_number or new_mode != bill.mode_of_transport do
+          multi
+          |> Ecto.Multi.run(:first_leg, fn _repo, _changes -> ensure_first_leg(bill) end)
+          |> Ecto.Multi.insert(:part_b, fn _changes ->
+            PartBUpdate.changeset(%PartBUpdate{}, %{
+              "e_way_bill_id" => bill.id,
+              "vehicle_number" => new_vehicle,
+              "mode_of_transport" => new_mode,
+              "place" => place,
+              "reason" => reason,
+              "updated_on" => DateTime.utc_now() |> DateTime.truncate(:second)
+            })
+          end)
+        else
+          multi
+        end
+
+      multi
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{bill: updated}} ->
+          updated = preload_bill(updated, force: true)
+
+          Audit.log_event(:extend_e_way_bill_validity, "EWayBill", updated.id,
+            details: %{
+              ewb_number: updated.ewb_number,
+              valid_until: updated.valid_until,
+              reason: reason,
+              remarks: Map.get(params, "remarks")
+            }
+          )
+
+          Notifications.notify(%{
+            kind: "e_way_bill",
+            title: "E-Way Bill #{updated.ewb_number} validity extended",
+            body: "Valid until #{Calendar.strftime(updated.valid_until, "%d/%m/%Y %H:%M")}",
+            path: "/invoices/#{updated.invoice_id}",
+            dedupe_key: "ewb_extended:#{updated.id}:#{NaiveDateTime.to_date(updated.valid_until)}"
+          })
+
+          broadcast_change(updated)
+          Webhooks.publish("e_way_bill.extended", updated.id)
+          {:ok, updated}
+
+        {:error, _step, changeset, _changes} ->
+          {:error, changeset}
+      end
+    end
+  end
+
   @doc "One non-binned bill with its invoice and history, or `nil` (also for bad ids)."
   def get_e_way_bill(id), do: fetch_by_id(EWayBill.kept(), id)
 
@@ -270,11 +380,17 @@ defmodule QuantumBilling.EWayBills do
   defp announce(result, _action, _opts), do: result
 
   @doc """
-  The live (not cancelled, not binned) bill for an invoice, or `nil`.
+  The live (not cancelled, not expired, not binned) bill for an invoice, or `nil`.
   """
   def live_bill_for_invoice(invoice_id) do
+    now = now_ist()
+
     EWayBill.kept()
-    |> where([b], b.invoice_id == ^invoice_id and b.status != "Cancelled")
+    |> where(
+      [b],
+      b.invoice_id == ^invoice_id and b.status == "Active" and
+        (is_nil(b.valid_until) or b.valid_until >= ^now)
+    )
     |> Repo.one()
     |> preload_bill()
   end
@@ -339,19 +455,38 @@ defmodule QuantumBilling.EWayBills do
   @doc "How long after generation a bill may still be cancelled, in hours."
   def cancellation_window_hours, do: @cancellation_window_hours
 
+  @doc "How long before or after expiry a bill's validity may be extended, in hours (Rule 138(10))."
+  def extension_window_hours, do: @extension_window_hours
+
   @doc """
   Whether this bill is still inside its Rule 138(9) cancellation window.
   """
   def cancellable?(%EWayBill{} = bill), do: ensure_cancellable(bill) == :ok
 
   @doc """
-  A bill's status. "Expired" is derived from `valid_until`.
+  Whether this bill is eligible for Rule 138(10) validity extension.
+
+  Extension is allowed within 8 hours before or 8 hours after the expiry time,
+  for bills that have not been cancelled.
+  """
+  def extendable?(%EWayBill{status: "Cancelled"}), do: false
+  def extendable?(%EWayBill{valid_until: nil}), do: false
+
+  def extendable?(%EWayBill{valid_until: valid_until}) do
+    now = now_ist()
+    diff = NaiveDateTime.diff(now, valid_until, :second)
+    diff >= -@extension_window_seconds and diff <= @extension_window_seconds
+  end
+
+  @doc """
+  A bill's status. "Expired" is derived from `valid_until` compared with Indian Standard Time.
   """
   def status(%EWayBill{status: "Cancelled"}), do: "Cancelled"
+  def status(%EWayBill{status: "Expired"}), do: "Expired"
   def status(%EWayBill{valid_until: nil}), do: "Active"
 
   def status(%EWayBill{valid_until: valid_until}) do
-    if NaiveDateTime.compare(valid_until, NaiveDateTime.utc_now()) == :lt,
+    if NaiveDateTime.compare(valid_until, now_ist()) == :lt,
       do: "Expired",
       else: "Active"
   end
@@ -359,12 +494,37 @@ defmodule QuantumBilling.EWayBills do
   defp ensure_issuable(%Invoice{status: "Cancelled"}), do: {:error, :cancelled}
 
   defp ensure_issuable(%Invoice{id: id}) do
-    exists =
+    now = now_ist()
+
+    active_exists =
       EWayBill.kept()
-      |> where([b], b.invoice_id == ^id and b.status != "Cancelled")
+      |> where(
+        [b],
+        b.invoice_id == ^id and b.status == "Active" and
+          (is_nil(b.valid_until) or b.valid_until >= ^now)
+      )
       |> Repo.exists?()
 
-    if exists, do: {:error, :already_issued}, else: :ok
+    if active_exists, do: {:error, :already_issued}, else: :ok
+  end
+
+  defp ensure_extendable(%EWayBill{status: "Cancelled"}), do: {:error, :already_cancelled}
+  defp ensure_extendable(%EWayBill{valid_until: nil}), do: {:error, :no_validity}
+
+  defp ensure_extendable(%EWayBill{valid_until: valid_until}) do
+    now = now_ist()
+    diff = NaiveDateTime.diff(now, valid_until, :second)
+
+    cond do
+      diff < -@extension_window_seconds ->
+        {:error, :too_early}
+
+      diff > @extension_window_seconds ->
+        {:error, :window_closed}
+
+      true ->
+        :ok
+    end
   end
 
   defp ensure_cancellable(%EWayBill{status: "Cancelled"}), do: {:error, :already_cancelled}
@@ -453,15 +613,23 @@ defmodule QuantumBilling.EWayBills do
   defp status_where(query, "Cancelled"), do: where(query, [bill: b], b.status == "Cancelled")
 
   defp status_where(query, "Expired") do
-    now = NaiveDateTime.utc_now()
+    now = now_ist()
 
-    where(query, [bill: b], b.status != "Cancelled" and b.valid_until < ^now)
+    where(
+      query,
+      [bill: b],
+      b.status == "Expired" or (b.status != "Cancelled" and b.valid_until < ^now)
+    )
   end
 
   defp status_where(query, "Active") do
-    now = NaiveDateTime.utc_now()
+    now = now_ist()
 
-    where(query, [bill: b], b.status != "Cancelled" and b.valid_until >= ^now)
+    where(
+      query,
+      [bill: b],
+      b.status == "Active" and (is_nil(b.valid_until) or b.valid_until >= ^now)
+    )
   end
 
   defp status_where(query, _unknown), do: query
@@ -488,6 +656,10 @@ defmodule QuantumBilling.EWayBills do
 
   defp clamp(_value, minimum, _maximum), do: minimum
 
+  defp now_ist do
+    NaiveDateTime.add(NaiveDateTime.utc_now(), @ist_offset_seconds, :second)
+  end
+
   defp stringify(params) do
     Map.new(params, fn {key, value} -> {to_string(key), value} end)
   end
@@ -511,6 +683,7 @@ defmodule QuantumBilling.EWayBills do
       mode_of_transport: bill.mode_of_transport,
       status: status(bill),
       cancellable: cancellable?(bill),
+      extendable: extendable?(bill),
       custom_fields: bill.custom_fields || %{}
     }
   end

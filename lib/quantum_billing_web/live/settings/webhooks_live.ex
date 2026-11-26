@@ -18,6 +18,7 @@ defmodule QuantumBillingWeb.SettingsLive.Webhooks do
     "client.created" => "A client is added",
     "client.updated" => "A client is edited",
     "e_way_bill.generated" => "An e-way bill is generated",
+    "e_way_bill.extended" => "An e-way bill validity is extended",
     "e_way_bill.cancelled" => "An e-way bill is cancelled",
     "credit_note.created" => "A credit or debit note is raised",
     "quotation.created" => "A quotation is created",

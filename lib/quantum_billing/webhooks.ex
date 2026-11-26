@@ -28,6 +28,7 @@ defmodule QuantumBilling.Webhooks do
     "client.created" => "client",
     "client.updated" => "client",
     "e_way_bill.generated" => "e_way_bill",
+    "e_way_bill.extended" => "e_way_bill",
     "e_way_bill.cancelled" => "e_way_bill",
     "credit_note.created" => "credit_note",
     "quotation.created" => "quotation",

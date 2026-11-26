@@ -40,5 +40,11 @@ defmodule QuantumBilling.EWayBills.ValidityTest do
     test "takes a DateTime too" do
       assert Validity.valid_until(~U[2026-09-24 18:30:00Z], 150) == ~N[2026-09-25 23:59:59]
     end
+
+    test "valid_until_ist/3 accounts for IST midnight date rollover" do
+      # In UTC, 2026-09-24 19:00:00 is 2026-09-25 00:30:00 in IST
+      # Generating 150km on 2026-09-25 IST expires at midnight of 2026-09-26
+      assert Validity.valid_until_ist(~U[2026-09-24 19:00:00Z], 150) == ~N[2026-09-26 23:59:59]
+    end
   end
 end

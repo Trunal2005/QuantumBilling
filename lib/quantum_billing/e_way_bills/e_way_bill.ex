@@ -2,9 +2,9 @@ defmodule QuantumBilling.EWayBills.EWayBill do
   @moduledoc """
   One e-way bill raised against one invoice.
 
-  `status` stores only `"Active"` or `"Cancelled"`; expiry is derived from
-  `valid_until` by `EWayBills.status/1`. Cancelled rows are kept (Rule 138(9)),
-  and a partial unique index allows one live bill per invoice. Binning sets
+  `status` stores `"Active"`, `"Cancelled"`, or `"Expired"`; expiry is derived from
+  `valid_until` by `EWayBills.status/1`. Cancelled and expired rows are kept (Rule 138(9)),
+  and a partial unique index allows one live (Active) bill per invoice. Binning sets
   `deleted_at` locally only; the portal is not told.
   """
   use Ecto.Schema
@@ -16,7 +16,7 @@ defmodule QuantumBilling.EWayBills.EWayBill do
   alias QuantumBilling.EWayBills.PartBUpdate
   alias QuantumBilling.Invoices.Invoice
 
-  @statuses ["Active", "Cancelled"]
+  @statuses ["Active", "Cancelled", "Expired"]
   @transport_modes ["Road", "Rail", "Air", "Ship"]
   @portal_modes ["demo", "live"]
 

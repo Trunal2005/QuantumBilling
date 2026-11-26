@@ -14,6 +14,7 @@ defmodule QuantumBilling.EWayBills.NICClient do
   @generate_path "/ewaybillapi/v1.03/gstr1/generate"
   @cancel_path "/ewaybillapi/v1.03/ewayapi/canewb"
   @part_b_path "/ewaybillapi/v1.03/ewayapi/vehewb"
+  @extend_validity_path "/ewaybillapi/v1.03/ewayapi/extendValidity"
 
   @doc """
   Requests a bill number and validity: `{:ok, attrs}` of `EWayBill` fields; the caller adds `invoice_id`.
@@ -91,6 +92,15 @@ defmodule QuantumBilling.EWayBills.NICClient do
       "This bill was filed on the portal, but no portal is configured now (NIC_EWB_API_URL). " <>
         "Nothing was changed."
 
+  def error_message(:already_cancelled),
+    do: "A cancelled e-way bill cannot be updated or extended."
+
+  def error_message(:too_early),
+    do: "Rule 138(10) allows validity extension only within 8 hours before or after expiry."
+
+  def error_message(:window_closed),
+    do: "The 8-hour statutory validity extension window has expired."
+
   def error_message(_reason), do: nil
 
   @doc """
@@ -144,6 +154,49 @@ defmodule QuantumBilling.EWayBills.NICClient do
       {:ok, %{"ewbNo" => bill.ewb_number, "vehUpdDate" => now_string()}}
     else
       post(@part_b_path, payload)
+    end
+  end
+
+  @doc """
+  Extends a bill's validity on the portal under Rule 138(10).
+  """
+  def extend_validity(%EWayBill{} = bill, params \\ %{}) do
+    params = stringify(params)
+
+    remaining_km = integer(Map.get(params, "remaining_distance"), 100)
+    vehicle_no = presence(Map.get(params, "vehicle_number")) || bill.vehicle_number
+    mode = presence(Map.get(params, "mode_of_transport")) || bill.mode_of_transport || "Road"
+    from_place = presence(Map.get(params, "from_place")) || "In Transit"
+    reason = Map.get(params, "reason") || "Others"
+    remarks = Map.get(params, "remarks") || "Extended under Rule 138(10)"
+
+    payload = %{
+      "ewbNo" => bill.ewb_number,
+      "vehicleNo" => vehicle_no,
+      "fromPlace" => from_place,
+      "fromState" => integer(Map.get(params, "from_state"), 27),
+      "remainingDistance" => remaining_km,
+      "transDocNo" => Map.get(params, "trans_doc_no", ""),
+      "transDocDate" => Map.get(params, "trans_doc_date", ""),
+      "transMode" => transport_code(mode),
+      "extnRsnCode" => extension_reason_code(reason),
+      "extnRemarks" => remarks
+    }
+
+    if EWayBill.demo?(bill) do
+      extra_days = Validity.days(remaining_km)
+      base_date = if bill.valid_until, do: NaiveDateTime.to_date(bill.valid_until), else: Date.utc_today()
+      new_date = Date.add(base_date, extra_days)
+      new_valid_until = NaiveDateTime.new!(new_date, ~T[23:59:59])
+
+      {:ok,
+       %{
+         "ewbNo" => bill.ewb_number,
+         "validUntil" => Calendar.strftime(new_valid_until, "%d/%m/%Y %I:%M:%S %p"),
+         "valid_until" => new_valid_until
+       }}
+    else
+      post(@extend_validity_path, payload)
     end
   end
 
@@ -211,6 +264,21 @@ defmodule QuantumBilling.EWayBills.NICClient do
   end
 
   defp cancel_reason_code(_reason), do: "4"
+
+  defp extension_reason_code(reason) when is_binary(reason) do
+    downcased = String.downcase(reason)
+
+    cond do
+      String.contains?(downcased, "calamity") -> "1"
+      String.contains?(downcased, "law") or String.contains?(downcased, "order") -> "2"
+      String.contains?(downcased, "tranship") or String.contains?(downcased, "transship") -> "3"
+      String.contains?(downcased, "accident") -> "4"
+      String.contains?(downcased, "breakdown") -> "5"
+      true -> "99"
+    end
+  end
+
+  defp extension_reason_code(_reason), do: "99"
 
   defp now_string, do: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second) |> to_string()
 

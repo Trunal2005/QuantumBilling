@@ -92,6 +92,8 @@ defmodule QuantumBilling.Invoices do
   does not exclude its invoice (Rule 138(9)).
   """
   def awaiting_e_way_bill(limit \\ 50) do
+    now = NaiveDateTime.add(NaiveDateTime.utc_now(), 19_800, :second)
+
     Invoice.kept()
     |> where([i], i.status != "Cancelled")
     |> where(
@@ -99,8 +101,8 @@ defmodule QuantumBilling.Invoices do
       not exists(
         from b in QuantumBilling.EWayBills.EWayBill,
           where:
-            b.invoice_id == parent_as(:invoice).id and b.status != "Cancelled" and
-              is_nil(b.deleted_at),
+            b.invoice_id == parent_as(:invoice).id and b.status == "Active" and
+              (is_nil(b.valid_until) or b.valid_until >= ^now) and is_nil(b.deleted_at),
           select: 1
       )
     )

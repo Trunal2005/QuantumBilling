@@ -85,7 +85,7 @@ defmodule QuantumBilling.EWayBills.EWayBillForm do
 
   @required ~w(supply_type sub_type document_type document_no document_date
                transaction_type from_party from_state to_party to_state
-               total_goods_value transport_mode vehicle_no from_place to_place
+               total_goods_value transport_mode from_place to_place
                distance_km)a
 
   @amount_fields ~w(total_goods_value cgst_value sgst_value igst_value other_amount)a
@@ -151,13 +151,30 @@ defmodule QuantumBilling.EWayBills.EWayBillForm do
     # The portal's ceiling.
     |> validate_number(:distance_km, greater_than: 0, less_than_or_equal_to: 4000)
     |> validate_amounts()
-    |> update_change(:vehicle_no, &String.upcase(String.replace(&1 || "", ~r/\s/, "")))
-    |> validate_format(:vehicle_no, @vehicle_format, message: "must look like MH01AB1234")
+    |> validate_transport_identifier()
     |> validate_gstin(:from_gstin)
     |> validate_gstin(:to_gstin)
     |> validate_transporter_id()
     |> validate_length(:remarks, max: 500)
     |> CustomFields.cast("e_way_bill", attrs)
+  end
+
+  defp validate_transport_identifier(changeset) do
+    mode = get_field(changeset, :transport_mode) || "Road"
+
+    case mode do
+      "Road" ->
+        changeset
+        |> validate_required([:vehicle_no])
+        |> update_change(:vehicle_no, &String.upcase(String.replace(&1 || "", ~r/\s/, "")))
+        |> validate_format(:vehicle_no, @vehicle_format, message: "must look like MH01AB1234")
+
+      _other_mode ->
+        changeset
+        |> validate_required([:vehicle_no])
+        |> update_change(:vehicle_no, &String.trim(&1 || ""))
+        |> validate_length(:vehicle_no, min: 2, max: 30)
+    end
   end
 
   @doc """

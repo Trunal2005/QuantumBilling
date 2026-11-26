@@ -33,7 +33,7 @@ defmodule QuantumBilling.EWayBills.PartBUpdate do
     |> put_updated_on()
     |> validate_required([:vehicle_number, :mode_of_transport, :updated_on, :e_way_bill_id])
     |> validate_inclusion(:mode_of_transport, @transport_modes)
-    |> validate_length(:vehicle_number, min: 4, max: 20)
+    |> validate_length(:vehicle_number, min: 2, max: 30)
     |> foreign_key_constraint(:e_way_bill_id)
   end
 

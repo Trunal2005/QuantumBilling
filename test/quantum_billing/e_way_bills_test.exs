@@ -96,6 +96,56 @@ defmodule QuantumBilling.EWayBillsTest do
       assert second.id != first.id
       assert EWayBills.live_bill_for_invoice(invoice.id).id == second.id
     end
+
+    test "allows a fresh bill once the previous one has expired" do
+      invoice = invoice_fixture()
+      first = bill_fixture(invoice)
+
+      expired_valid_until =
+        NaiveDateTime.utc_now()
+        |> NaiveDateTime.add(-86_400, :second)
+        |> NaiveDateTime.truncate(:second)
+
+      {:ok, _} =
+        first
+        |> Ecto.Changeset.change(%{valid_until: expired_valid_until})
+        |> Repo.update()
+
+      assert {:ok, second} = EWayBills.generate_e_way_bill(invoice, %{"distance_km" => "250"})
+      assert second.id != first.id
+      assert EWayBills.status(second) == "Active"
+      assert EWayBills.live_bill_for_invoice(invoice.id).id == second.id
+
+      # Prior bill is marked Expired
+      reloaded_first = Repo.get!(EWayBill, first.id)
+      assert reloaded_first.status == "Expired"
+    end
+
+    test "supports multi-modal transport modes (Rail, Air, Ship) with consignment doc numbers" do
+      invoice1 = invoice_fixture()
+
+      assert {:ok, rail_bill} =
+               EWayBills.generate_e_way_bill(invoice1, %{
+                 "mode_of_transport" => "Rail",
+                 "vehicle_number" => "RR-849204",
+                 "distance_km" => "500"
+               })
+
+      assert rail_bill.mode_of_transport == "Rail"
+      assert rail_bill.vehicle_number == "RR-849204"
+
+      invoice2 = invoice_fixture()
+
+      assert {:ok, air_bill} =
+               EWayBills.generate_e_way_bill(invoice2, %{
+                 "mode_of_transport" => "Air",
+                 "vehicle_number" => "AWB-1092847",
+                 "distance_km" => "1200"
+               })
+
+      assert air_bill.mode_of_transport == "Air"
+      assert air_bill.vehicle_number == "AWB-1092847"
+    end
   end
 
   describe "cancel_e_way_bill/2" do
@@ -149,6 +199,88 @@ defmodule QuantumBilling.EWayBillsTest do
         |> Repo.update!()
 
       assert EWayBills.cancellable?(recent)
+    end
+  end
+
+  describe "extend_validity/2" do
+    test "extends validity within the 8-hour window and records Part-B update if vehicle changed" do
+      bill = bill_fixture()
+
+      # Set valid_until to 2 hours from now in IST (within the 8-hour window before expiry)
+      near_expiry =
+        NaiveDateTime.add(NaiveDateTime.utc_now(), 7_200 + 19_800, :second)
+        |> NaiveDateTime.truncate(:second)
+
+      {:ok, bill} =
+        bill
+        |> Ecto.Changeset.change(%{valid_until: near_expiry})
+        |> Repo.update()
+
+      assert EWayBills.extendable?(bill)
+
+      assert {:ok, extended} =
+               EWayBills.extend_validity(bill, %{
+                 "remaining_distance" => "300",
+                 "reason" => "Breakdown",
+                 "vehicle_number" => "MH14EF9999",
+                 "mode_of_transport" => "Road",
+                 "from_place" => "Nashik",
+                 "remarks" => "Engine failure on highway"
+               })
+
+      assert extended.distance_km == 300
+      assert extended.vehicle_number == "MH14EF9999"
+      assert NaiveDateTime.compare(extended.valid_until, near_expiry) == :gt
+
+      # Part-B update recorded
+      assert length(extended.part_b_updates) >= 1
+      last_leg = List.last(extended.part_b_updates)
+      assert last_leg.vehicle_number == "MH14EF9999"
+      assert last_leg.reason == "Breakdown"
+    end
+
+    test "refuses extension when too early (more than 8 hours before expiry)" do
+      bill = bill_fixture()
+
+      # Set valid_until to 24 hours in future (more than 8 hours before expiry)
+      far_future =
+        NaiveDateTime.add(NaiveDateTime.utc_now(), 86_400 + 19_800, :second)
+        |> NaiveDateTime.truncate(:second)
+
+      {:ok, bill} =
+        bill
+        |> Ecto.Changeset.change(%{valid_until: far_future})
+        |> Repo.update()
+
+      refute EWayBills.extendable?(bill)
+      assert {:error, :too_early} = EWayBills.extend_validity(bill, %{})
+    end
+
+    test "refuses extension when window closed (more than 8 hours after expiry)" do
+      bill = bill_fixture()
+
+      # Set valid_until to 12 hours in past (more than 8 hours after expiry)
+      long_expired =
+        NaiveDateTime.add(NaiveDateTime.utc_now(), -43_200 + 19_800, :second)
+        |> NaiveDateTime.truncate(:second)
+
+      {:ok, bill} =
+        bill
+        |> Ecto.Changeset.change(%{valid_until: long_expired})
+        |> Repo.update()
+
+      refute EWayBills.extendable?(bill)
+      assert {:error, :window_closed} = EWayBills.extend_validity(bill, %{})
+    end
+
+    test "refuses extension when bill is cancelled" do
+      bill = bill_fixture()
+
+      {:ok, cancelled} =
+        EWayBills.cancel_e_way_bill(bill, %{"cancellation_reason" => "Order Cancelled"})
+
+      refute EWayBills.extendable?(cancelled)
+      assert {:error, :already_cancelled} = EWayBills.extend_validity(cancelled, %{})
     end
   end
 

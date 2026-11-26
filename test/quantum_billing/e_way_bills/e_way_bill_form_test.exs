@@ -86,6 +86,35 @@ defmodule QuantumBilling.EWayBills.EWayBillFormTest do
       assert %{vehicle_no: ["must look like MH01AB1234"]} = errors_on(changeset)
     end
 
+    test "accepts railway receipt, airway bill, and bill of lading for non-road transport modes" do
+      rail_changeset =
+        EWayBillForm.changeset(
+          %EWayBillForm{},
+          valid_attrs(%{"transport_mode" => "Rail", "vehicle_no" => "RR-123456"})
+        )
+
+      assert rail_changeset.valid?
+      assert Ecto.Changeset.get_field(rail_changeset, :vehicle_no) == "RR-123456"
+
+      air_changeset =
+        EWayBillForm.changeset(
+          %EWayBillForm{},
+          valid_attrs(%{"transport_mode" => "Air", "vehicle_no" => "AWB-9876543"})
+        )
+
+      assert air_changeset.valid?
+      assert Ecto.Changeset.get_field(air_changeset, :vehicle_no) == "AWB-9876543"
+
+      ship_changeset =
+        EWayBillForm.changeset(
+          %EWayBillForm{},
+          valid_attrs(%{"transport_mode" => "Ship", "vehicle_no" => "BOL-456789"})
+        )
+
+      assert ship_changeset.valid?
+      assert Ecto.Changeset.get_field(ship_changeset, :vehicle_no) == "BOL-456789"
+    end
+
     test "normalizes the vehicle number to upper case without spaces" do
       changeset =
         EWayBillForm.changeset(%EWayBillForm{}, valid_attrs(%{"vehicle_no" => "mh 01 ab 1234"}))

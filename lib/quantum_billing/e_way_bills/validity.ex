@@ -8,9 +8,13 @@ defmodule QuantumBilling.EWayBills.Validity do
   """
 
   @kilometres_per_day %{regular: 200, over_dimensional: 20}
+  @ist_offset_seconds 19_800
 
   @doc """
   The last valid instant of a bill generated at `generated_at`. `cargo` is `:regular` (default) or `:over_dimensional`.
+
+  Statutorily, e-way bills expire at midnight Indian Standard Time (IST, UTC+5:30) of the
+  expiry date, returning a naive datetime ending in `23:59:59`.
   """
   def valid_until(generated_at, distance_km, cargo \\ :regular)
 
@@ -25,6 +29,27 @@ defmodule QuantumBilling.EWayBills.Validity do
     generated_at
     |> DateTime.to_naive()
     |> valid_until(distance_km, cargo)
+  end
+
+  @doc """
+  Calculates validity with strict Indian Standard Time (IST, UTC+5:30) midnight conversion.
+  """
+  def valid_until_ist(generated_at, distance_km, cargo \\ :regular) do
+    ist_date =
+      case generated_at do
+        %DateTime{} = dt ->
+          dt |> DateTime.add(@ist_offset_seconds, :second) |> DateTime.to_date()
+
+        %NaiveDateTime{} = ndt ->
+          ndt |> NaiveDateTime.to_date()
+
+        %Date{} = d ->
+          d
+      end
+
+    ist_date
+    |> Date.add(days(distance_km, cargo))
+    |> NaiveDateTime.new!(~T[23:59:59])
   end
 
   @doc """
